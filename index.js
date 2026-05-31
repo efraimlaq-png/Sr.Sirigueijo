@@ -173,9 +173,6 @@ const comandos = [
             sub.setName('exportar-planilha')
                 .setDescription('Gera planilha Excel e envia na DM do cargo financeiro'))
         .addSubcommand(sub =>
-            sub.setName('planilha-aqui')
-                .setDescription('Envia a planilha de saldos atualizada neste canal'))
-        .addSubcommand(sub =>
             sub.setName('sincronizar-recibos')
                 .setDescription('Processa recibos antigos do canal de integração')
                 .addIntegerOption(opt =>
@@ -337,80 +334,11 @@ client.once('ready', async () => {
     console.log('Configuração por servidor: use /configuracoes em cada guild (canal-recibos, cargo-financeiro, canal-resgates).');
 });
 
-// IDs dos bots autorizados a usar p!m (adicione no .env como BOT_IDS_AUTORIZADOS=id1,id2)
-const BOT_IDS_AUTORIZADOS = new Set(
-    (process.env.BOT_IDS_AUTORIZADOS || '').split(',').map(s => s.trim()).filter(Boolean)
-);
-
-async function processarComandoPm(message) {
-    // Só aceita bots autorizados
-    if (!message.author?.bot) return;
-    if (!BOT_IDS_AUTORIZADOS.has(message.author.id)) return;
-
-    // Formato esperado: p!m <valor> <userId>
-    // Exemplo: p!m 150 123456789012345678
-    const match = message.content.match(/^p!m\s+(\d+(?:[.,]\d+)?)\s+(\d{17,20})\s*$/i);
-    if (!match) return;
-
-    const valor = parseInt(match[1].replace(',', '.'), 10);
-    const userId = match[2];
-
-    if (!valor || valor <= 0) {
-        console.warn(`p!m ignorado: valor inválido (${match[1]}) — bot ${message.author.tag}`);
-        return;
-    }
-
-    try {
-        const antes = storage.obterSaldoMembro(message.guildId, userId);
-
-        // Busca o displayName do membro, se possível
-        const guildMember = await message.guild.members.fetch(userId).catch(() => null);
-        const displayName = guildMember?.displayName;
-
-        storage.ajustarSaldo(message.guildId, userId, valor, displayName);
-        const depois = storage.obterSaldoMembro(message.guildId, userId);
-
-        storage.registrarTransacao(message.guildId, {
-            type: TIPOS_TRANSACAO.AJUSTE_ADICIONAR,
-            userId,
-            amount: valor,
-            balanceBefore: antes,
-            balanceAfter: depois,
-            adminId: message.author.id,
-            metadata: { motivo: `Split via p!m (bot ${message.author.tag})` }
-        });
-
-        console.log(`[p!m] +${valor} para ${userId} (${displayName || 'desconhecido'}) | antes: ${antes} → depois: ${depois} | bot: ${message.author.tag}`);
-
-        try {
-            await message.react('✅');
-        } catch { /* canal pode não permitir reações */ }
-
-        // Notifica a planilha ao cargo financeiro após crédito
-        await enviarPlanilhaParaCargo(
-            message.guild,
-            `Split via p!m: **${formatarPrata(valor)}** adicionado a <@${userId}> pelo bot ${message.author.tag}.`
-        );
-    } catch (error) {
-        console.error('[p!m] Erro ao processar crédito:', error);
-        try { await message.react('❌'); } catch { /* ignore */ }
-    }
-}
+const FRIDAY_BOT_ID = '1508430041346867230';
 
 client.on('messageCreate', async (message) => {
     if (!message.guild) return;
-
-    // Mensagem de bot: verificar se é um p!m autorizado
-    if (message.author?.bot) {
-        try {
-            await processarComandoPm(message);
-        } catch (error) {
-            console.error('Erro ao processar p!m:', error);
-        }
-        return;
-    }
-
-    // Mensagem humana: processar recibo normalmente
+    if (message.author?.bot && message.author.id !== FRIDAY_BOT_ID) return;
     try {
         await processarReciboEMnotificar(message);
     } catch (error) {
@@ -591,18 +519,6 @@ async function tratarComando(interaction) {
                 return interaction.editReply(`❌ Não foi possível enviar: ${envio.motivo}`);
             }
             return interaction.editReply(`✅ Planilha enviada para **${envio.enviados}** membro(s) do cargo financeiro (${envio.falhas} falha(s) de DM).`);
-        }
-
-        if (sub === 'planilha-aqui') {
-            await interaction.deferReply();
-            const caminho = await gerarPlanilhaSaldos(interaction.guild);
-            const arquivo = new AttachmentBuilder(caminho, { name: path.basename(caminho) });
-            const embed = new EmbedBuilder()
-                .setColor('#2ecc71')
-                .setTitle('📊 Planilha de Saldos')
-                .setDescription(`Gerada por ${interaction.user} — saldos atualizados.`)
-                .setTimestamp();
-            return interaction.editReply({ embeds: [embed], files: [arquivo] });
         }
 
         if (sub === 'sincronizar-recibos') {
