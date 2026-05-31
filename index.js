@@ -334,11 +334,8 @@ client.once('ready', async () => {
     console.log('Configuração por servidor: use /configuracoes em cada guild (canal-recibos, cargo-financeiro, canal-resgates).');
 });
 
-const FRIDAY_BOT_ID = '1508430041346867230';
-
 client.on('messageCreate', async (message) => {
-    if (!message.guild) return;
-    if (message.author?.bot && message.author.id !== FRIDAY_BOT_ID) return;
+    if (!message.guild || message.author?.bot) return;
     try {
         await processarReciboEMnotificar(message);
     } catch (error) {
