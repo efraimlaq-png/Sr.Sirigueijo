@@ -13,7 +13,8 @@ const {
     ButtonBuilder,
     ButtonStyle,
     PermissionFlagsBits,
-    AttachmentBuilder
+    AttachmentBuilder,
+    ChannelType
 } = require('discord.js');
 
 const { processarMensagemRecibo } = require('./lib/receipts');
@@ -21,19 +22,38 @@ const { gerarPlanilhaSaldos } = require('./lib/excel');
 const { formatarPrata, formatarData } = require('./lib/format');
 const { STATUS_RESGATE, TIPOS_TRANSACAO } = require('./lib/constants');
 const storage = require('./lib/storage');
+const guildConfig = require('./lib/guild-config');
 
 const {
     DISCORD_TOKEN,
     CLIENT_ID,
-    GUILD_ID,
-    CANAL_RECIBOS_ID,
-    CARGO_FINANCEIRO_ID,
-    CANAL_RESGATES_ID
+    GUILD_ID
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID) {
     console.error('Defina DISCORD_TOKEN e CLIENT_ID no arquivo .env');
     process.exit(1);
+}
+
+const GUILD_IDS_EXEMPLO = new Set(['id_do_servidor', '987654321098765432']);
+
+function validarSnowflake(nome, valor) {
+    if (!valor) return true;
+    if (!/^\d{17,20}$/.test(valor)) {
+        console.error(`${nome} inválido: use só o número copiado do Discord (Modo desenvolvedor). Valor atual: "${valor}"`);
+        process.exit(1);
+    }
+    return true;
+}
+
+if (GUILD_ID) {
+    validarSnowflake('GUILD_ID', GUILD_ID);
+    if (GUILD_IDS_EXEMPLO.has(GUILD_ID)) {
+        console.error(
+            'GUILD_ID ainda é um valor de exemplo. No Discord: botão direito no ícone do SEU servidor → Copiar ID do servidor → cole no .env do Replit.'
+        );
+        process.exit(1);
+    }
 }
 
 const client = new Client({
@@ -47,16 +67,30 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message]
 });
 
-function membroTemCargoFinanceiro(member) {
-    return Boolean(CARGO_FINANCEIRO_ID && member?.roles?.cache?.has(CARGO_FINANCEIRO_ID));
+function obterCargoFinanceiroId(guildId) {
+    return guildConfig.obter(guildId).cargoFinanceiroId;
 }
 
-function canalRecibosConfigurado() {
-    return Boolean(CANAL_RECIBOS_ID);
+function obterCanalRecibosId(guildId) {
+    return guildConfig.obter(guildId).canalRecibosId;
+}
+
+function obterCanalResgatesId(guildId) {
+    return guildConfig.obter(guildId).canalResgatesId;
+}
+
+function membroTemCargoFinanceiro(member) {
+    const cargoId = obterCargoFinanceiroId(member.guild.id);
+    return Boolean(cargoId && member?.roles?.cache?.has(cargoId));
+}
+
+function canalRecibosConfigurado(guildId) {
+    return Boolean(obterCanalRecibosId(guildId));
 }
 
 async function enviarPlanilhaParaCargo(guild, motivo = 'Atualização de saldos') {
-    if (!CARGO_FINANCEIRO_ID) return { enviados: 0, falhas: 0, motivo: 'cargo_nao_configurado' };
+    const cargoFinanceiroId = obterCargoFinanceiroId(guild.id);
+    if (!cargoFinanceiroId) return { enviados: 0, falhas: 0, motivo: 'cargo_nao_configurado' };
 
     const caminho = await gerarPlanilhaSaldos(guild);
     const arquivo = new AttachmentBuilder(caminho, { name: path.basename(caminho) });
@@ -66,8 +100,8 @@ async function enviarPlanilhaParaCargo(guild, motivo = 'Atualização de saldos'
         .setDescription(motivo)
         .setTimestamp();
 
-    const cargo = guild.roles.cache.get(CARGO_FINANCEIRO_ID)
-        || await guild.roles.fetch(CARGO_FINANCEIRO_ID).catch(() => null);
+    const cargo = guild.roles.cache.get(cargoFinanceiroId)
+        || await guild.roles.fetch(cargoFinanceiroId).catch(() => null);
     if (!cargo) return { enviados: 0, falhas: 0, motivo: 'cargo_nao_encontrado' };
 
     await guild.members.fetch();
@@ -88,9 +122,10 @@ async function enviarPlanilhaParaCargo(guild, motivo = 'Atualização de saldos'
 }
 
 async function notificarCanalResgates(guild, embed, components = []) {
-    if (!CANAL_RESGATES_ID) return null;
-    const canal = guild.channels.cache.get(CANAL_RESGATES_ID)
-        || await guild.channels.fetch(CANAL_RESGATES_ID).catch(() => null);
+    const canalResgatesId = obterCanalResgatesId(guild.id);
+    if (!canalResgatesId) return null;
+    const canal = guild.channels.cache.get(canalResgatesId)
+        || await guild.channels.fetch(canalResgatesId).catch(() => null);
     if (!canal?.isTextBased?.()) return null;
     return canal.send({ embeds: [embed], components });
 }
@@ -179,22 +214,103 @@ const comandos = [
                             { name: 'Aprovados', value: STATUS_RESGATE.APROVADO },
                             { name: 'Pagos', value: STATUS_RESGATE.PAGO },
                             { name: 'Recusados', value: STATUS_RESGATE.RECUSADO }
+                        ))),
+
+    new SlashCommandBuilder()
+        .setName('configuracoes')
+        .setDescription('Configura o bot neste servidor (canais e cargo financeiro)')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+        .addSubcommand(sub =>
+            sub.setName('ver')
+                .setDescription('Mostra as configurações atuais do servidor'))
+        .addSubcommand(sub =>
+            sub.setName('canal-recibos')
+                .setDescription('Define o canal onde o bot lê recibos')
+                .addChannelOption(opt =>
+                    opt.setName('canal')
+                        .setDescription('Canal de texto dos recibos')
+                        .setRequired(true)
+                        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)))
+        .addSubcommand(sub =>
+            sub.setName('cargo-financeiro')
+                .setDescription('Define o cargo que pode usar /admin e aprovar resgates')
+                .addRoleOption(opt =>
+                    opt.setName('cargo')
+                        .setDescription('Cargo da equipe financeira')
+                        .setRequired(true)))
+        .addSubcommand(sub =>
+            sub.setName('canal-resgates')
+                .setDescription('Define o canal onde aparecem pedidos de resgate')
+                .addChannelOption(opt =>
+                    opt.setName('canal')
+                        .setDescription('Canal de aprovações')
+                        .setRequired(true)
+                        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)))
+        .addSubcommand(sub =>
+            sub.setName('limpar')
+                .setDescription('Remove uma configuração do servidor')
+                .addStringOption(opt =>
+                    opt.setName('opcao')
+                        .setDescription('O que limpar')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Canal de recibos', value: 'canalRecibosId' },
+                            { name: 'Cargo financeiro', value: 'cargoFinanceiroId' },
+                            { name: 'Canal de resgates', value: 'canalResgatesId' }
                         )))
 ].map(c => c.toJSON());
 
+function formatarConfigCampo(valor, tipo) {
+    if (!valor) return '❌ Não configurado';
+    if (tipo === 'cargo') return `<@&${valor}>`;
+    return `<#${valor}>`;
+}
+
+function embedConfiguracoes(guildId) {
+    const cfg = guildConfig.obter(guildId);
+    return new EmbedBuilder()
+        .setColor('#9b59b6')
+        .setTitle('⚙️ Configurações do servidor')
+        .addFields(
+            { name: 'Canal de recibos', value: formatarConfigCampo(cfg.canalRecibosId, 'canal'), inline: false },
+            { name: 'Cargo financeiro', value: formatarConfigCampo(cfg.cargoFinanceiroId, 'cargo'), inline: false },
+            { name: 'Canal de resgates', value: formatarConfigCampo(cfg.canalResgatesId, 'canal'), inline: false }
+        )
+        .setFooter({
+            text: cfg.updatedAt
+                ? `Última alteração: ${formatarData(cfg.updatedAt)}`
+                : 'Use os subcomandos para definir cada opção'
+        })
+        .setTimestamp();
+}
+
 async function registrarComandos() {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-    if (GUILD_ID) {
-        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: comandos });
-        console.log(`Comandos registrados na guild ${GUILD_ID}`);
-    } else {
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: comandos });
-        console.log('Comandos registrados globalmente');
+    try {
+        if (GUILD_ID) {
+            await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: comandos });
+            console.log(`Comandos registrados na guild ${GUILD_ID}`);
+        } else {
+            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: comandos });
+            console.log('Comandos registrados globalmente');
+        }
+    } catch (error) {
+        if (error.code === 50001 && GUILD_ID) {
+            console.error(
+                `Discord recusou o servidor ${GUILD_ID} (Missing Access). Verifique:\n` +
+                '  1) GUILD_ID é o ID do servidor onde o bot está (copie de novo no Discord)\n' +
+                '  2) O bot foi convidado para esse servidor\n' +
+                `  3) Use este link de convite:\n` +
+                `     https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&permissions=268823632&scope=bot%20applications.commands`
+            );
+        }
+        throw error;
     }
 }
 
 async function processarReciboEMnotificar(message) {
-    if (!canalRecibosConfigurado() || message.channelId !== CANAL_RECIBOS_ID) return;
+    const canalRecibosId = obterCanalRecibosId(message.guild.id);
+    if (!canalRecibosId || message.channelId !== canalRecibosId) return;
     if (message.author?.id === client.user.id) return;
 
     const resultado = await processarMensagemRecibo(message, message.guild);
@@ -215,12 +331,7 @@ async function processarReciboEMnotificar(message) {
 
 client.once('ready', async () => {
     console.log(`Bot conectado como ${client.user.tag}`);
-    if (!canalRecibosConfigurado()) {
-        console.warn('CANAL_RECIBOS_ID não configurado — o bot não vai ler recibos automaticamente.');
-    }
-    if (!CARGO_FINANCEIRO_ID) {
-        console.warn('CARGO_FINANCEIRO_ID não configurado — planilhas não serão enviadas por DM.');
-    }
+    console.log('Configuração por servidor: use /configuracoes em cada guild (canal-recibos, cargo-financeiro, canal-resgates).');
 });
 
 client.on('messageCreate', async (message) => {
@@ -332,10 +443,66 @@ async function tratarComando(interaction) {
         });
     }
 
+    if (commandName === 'configuracoes') {
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === 'ver') {
+            return interaction.reply({ embeds: [embedConfiguracoes(interaction.guildId)], ephemeral: true });
+        }
+
+        if (sub === 'canal-recibos') {
+            const canal = interaction.options.getChannel('canal', true);
+            guildConfig.definirCanalRecibos(interaction.guildId, canal.id, interaction.user.id);
+            return interaction.reply({
+                content: `✅ Canal de recibos definido: ${canal}\nO bot vai ler mensagens desse canal automaticamente.`,
+                ephemeral: true
+            });
+        }
+
+        if (sub === 'cargo-financeiro') {
+            const cargo = interaction.options.getRole('cargo', true);
+            guildConfig.definirCargoFinanceiro(interaction.guildId, cargo.id, interaction.user.id);
+            return interaction.reply({
+                content: `✅ Cargo financeiro definido: ${cargo}\nMembros com esse cargo podem usar \`/admin\` e aprovar resgates.\nAtribua o cargo às pessoas em Configurações do servidor → Cargos.`,
+                ephemeral: true
+            });
+        }
+
+        if (sub === 'canal-resgates') {
+            const canal = interaction.options.getChannel('canal', true);
+            guildConfig.definirCanalResgates(interaction.guildId, canal.id, interaction.user.id);
+            return interaction.reply({
+                content: `✅ Canal de resgates definido: ${canal}\nNovos pedidos de \`/resgatar\` serão enviados aqui.`,
+                ephemeral: true
+            });
+        }
+
+        if (sub === 'limpar') {
+            const opcao = interaction.options.getString('opcao', true);
+            guildConfig.limparCampo(interaction.guildId, opcao, interaction.user.id);
+            const nomes = {
+                canalRecibosId: 'Canal de recibos',
+                cargoFinanceiroId: 'Cargo financeiro',
+                canalResgatesId: 'Canal de resgates'
+            };
+            return interaction.reply({
+                content: `✅ **${nomes[opcao]}** removido deste servidor.`,
+                embeds: [embedConfiguracoes(interaction.guildId)],
+                ephemeral: true
+            });
+        }
+    }
+
     if (commandName === 'admin') {
+        if (!obterCargoFinanceiroId(interaction.guildId)) {
+            return interaction.reply({
+                content: '❌ O cargo financeiro ainda não foi configurado. Quem gerencia o servidor deve usar `/configuracoes cargo-financeiro`.',
+                ephemeral: true
+            });
+        }
         if (!membroTemCargoFinanceiro(interaction.member)) {
             return interaction.reply({
-                content: '❌ Você precisa do cargo financeiro configurado para usar comandos admin.',
+                content: '❌ Você precisa do **cargo financeiro** do servidor para usar `/admin`. Peça a um administrador para atribuir o cargo a você.',
                 ephemeral: true
             });
         }
@@ -352,12 +519,16 @@ async function tratarComando(interaction) {
         }
 
         if (sub === 'sincronizar-recibos') {
-            if (!canalRecibosConfigurado()) {
-                return interaction.reply({ content: '❌ CANAL_RECIBOS_ID não está configurado no .env', ephemeral: true });
+            const canalRecibosId = obterCanalRecibosId(interaction.guildId);
+            if (!canalRecibosId) {
+                return interaction.reply({
+                    content: '❌ Canal de recibos não configurado. Use `/configuracoes canal-recibos`.',
+                    ephemeral: true
+                });
             }
             await interaction.deferReply({ ephemeral: true });
             const limite = interaction.options.getInteger('limite') || 100;
-            const canal = await interaction.guild.channels.fetch(CANAL_RECIBOS_ID);
+            const canal = await interaction.guild.channels.fetch(canalRecibosId);
             const mensagens = await canal.messages.fetch({ limit: limite });
             let processados = 0;
             let ignorados = 0;
@@ -466,6 +637,12 @@ async function tratarComando(interaction) {
 }
 
 async function tratarBotaoResgate(interaction) {
+    if (!obterCargoFinanceiroId(interaction.guildId)) {
+        return interaction.reply({
+            content: '❌ Cargo financeiro não configurado. Use `/configuracoes cargo-financeiro`.',
+            ephemeral: true
+        });
+    }
     if (!membroTemCargoFinanceiro(interaction.member)) {
         return interaction.reply({ content: '❌ Apenas o cargo financeiro pode gerenciar resgates.', ephemeral: true });
     }
