@@ -217,6 +217,10 @@ const comandos = [
                         ))),
 
     new SlashCommandBuilder()
+        .setName('solicitar-planilha')
+        .setDescription('Gera e envia a planilha de saldos neste canal'),
+
+    new SlashCommandBuilder()
         .setName('configuracoes')
         .setDescription('Configura o bot neste servidor (canais e cargo financeiro)')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -333,25 +337,21 @@ async function processarReciboEMnotificar(message) {
 // INTEGRAÇÃO LFG → p!m
 // ==========================================
 const FRIDAY_BOT_ID = '1508430041346867230';
-// ID do bot LFG — apenas ele pode emitir comandos p!m para crédito de saldo
-// Configure LFG_BOT_ID=<id_do_bot_lfg> no .env do Siri.
-const LFG_BOT_ID = process.env.LFG_BOT_ID || null;
+// ID do bot autorizado a emitir comandos p!m para crédito de saldo
+// Apenas mensagens deste bot serão aceitas — hardcoded por segurança.
+const LFG_BOT_ID = '1508430041346867230';
 
 // Regex que captura: p!m <userId> <valor>
 const REGEX_COMANDO_PM = /^p!m\s+(\d{17,20})\s+(\d+)\s*$/i;
 
 /**
- * Processa um comando p!m enviado exclusivamente pelo bot LFG.
+ * Processa um comando p!m enviado exclusivamente pelo bot autorizado (LFG_BOT_ID).
  * Formato: p!m <userId> <valor>
- * O canal é lido de obterCanalRecibosId (configurado via /configuracoes canal-recibos).
+ * Aceito em qualquer canal do servidor.
  * Retorna true se processou, false caso contrário.
  */
 async function processarComandoPM(message) {
-    if (!LFG_BOT_ID) return false;                        // LFG_BOT_ID não configurado no .env
-    if (message.author.id !== LFG_BOT_ID) return false;   // só aceita do bot LFG
-
-    const canalRecibosId = obterCanalRecibosId(message.guild.id);
-    if (!canalRecibosId || message.channelId !== canalRecibosId) return false;
+    if (message.author.id !== LFG_BOT_ID) return false;   // só aceita do bot autorizado
 
     const match = message.content.match(REGEX_COMANDO_PM);
     if (!match) return false;
@@ -383,12 +383,7 @@ async function processarComandoPM(message) {
 client.once('ready', async () => {
     console.log(`Bot conectado como ${client.user.tag}`);
     console.log('Configuração por servidor: use /configuracoes em cada guild (canal-recibos, cargo-financeiro, canal-resgates).');
-    if (LFG_BOT_ID) {
-        console.log('[integração LFG] Comandos p!m do bot ' + LFG_BOT_ID + ' serão aceitos no canal de recibos.');
-        console.log('[integração LFG] O canal de recibos já é lido da configuração por guild (/configuracoes canal-recibos).');
-    } else {
-        console.warn('[integração LFG] LFG_BOT_ID não definido no .env do Siri — comandos p!m serão IGNORADOS.');
-    }
+    console.log('[integração LFG] Comandos p!m do bot ' + LFG_BOT_ID + ' serão aceitos em qualquer canal do servidor.');
 });
 
 client.on('messageCreate', async (message) => {
@@ -469,6 +464,24 @@ async function tratarComando(interaction) {
         }
 
         return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (commandName === 'solicitar-planilha') {
+        await interaction.deferReply();
+        try {
+            const caminho = await gerarPlanilhaSaldos(interaction.guild);
+            const arquivo = new AttachmentBuilder(caminho, { name: path.basename(caminho) });
+            const embed = new EmbedBuilder()
+                .setColor('#2ecc71')
+                .setTitle('📊 Planilha de Saldos')
+                .setDescription(`Planilha gerada com os saldos atuais do servidor.`)
+                .setFooter({ text: `Solicitado por ${interaction.user.tag}` })
+                .setTimestamp();
+            return interaction.editReply({ embeds: [embed], files: [arquivo] });
+        } catch (err) {
+            console.error('[solicitar-planilha] Erro ao gerar planilha:', err);
+            return interaction.editReply('❌ Não foi possível gerar a planilha. Tente novamente.');
+        }
     }
 
     if (commandName === 'resgatar') {
