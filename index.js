@@ -329,17 +329,90 @@ async function processarReciboEMnotificar(message) {
     console.log(`Planilha enviada: ${envio.enviados} DM(s), ${envio.falhas} falha(s)`);
 }
 
+// ==========================================
+// INTEGRAÇÃO LFG → p!m
+// ==========================================
+const FRIDAY_BOT_ID = '1508430041346867230';
+// ID do bot LFG — apenas ele pode emitir comandos p!m para crédito de saldo
+// Configure LFG_BOT_ID=<id_do_bot_lfg> no .env do Siri.
+const LFG_BOT_ID = process.env.LFG_BOT_ID || null;
+
+// Regex que captura: p!m <userId> <valor>
+const REGEX_COMANDO_PM = /^p!m\s+(\d{17,20})\s+(\d+)\s*$/i;
+
+/**
+ * Processa um comando p!m enviado exclusivamente pelo bot LFG.
+ * Formato: p!m <userId> <valor>
+ * O canal é lido de obterCanalRecibosId (configurado via /configuracoes canal-recibos).
+ * Retorna true se processou, false caso contrário.
+ */
+async function processarComandoPM(message) {
+    if (!LFG_BOT_ID) return false;                        // LFG_BOT_ID não configurado no .env
+    if (message.author.id !== LFG_BOT_ID) return false;   // só aceita do bot LFG
+
+    const canalRecibosId = obterCanalRecibosId(message.guild.id);
+    if (!canalRecibosId || message.channelId !== canalRecibosId) return false;
+
+    const match = message.content.match(REGEX_COMANDO_PM);
+    if (!match) return false;
+
+    const userId = match[1];
+    const valor  = parseInt(match[2], 10);
+    if (!userId || isNaN(valor) || valor <= 0) return false;
+
+    const antes  = storage.obterSaldoMembro(message.guild.id, userId);
+    storage.ajustarSaldo(message.guild.id, userId, valor);
+    const depois = storage.obterSaldoMembro(message.guild.id, userId);
+
+    storage.registrarTransacao(message.guild.id, {
+        type: 'LFG_INTEGRACAO',
+        userId,
+        amount: valor,
+        balanceBefore: antes,
+        balanceAfter: depois,
+        metadata: { origem: 'lfg_bot', messageId: message.id }
+    });
+
+    console.log(`[p!m] <@${userId}> +${valor} pratas (antes: ${antes} → depois: ${depois}) via LFG`);
+
+    try { await message.react('✅'); } catch { /* sem permissão ou DM fechada */ }
+
+    return true;
+}
+
 client.once('ready', async () => {
     console.log(`Bot conectado como ${client.user.tag}`);
     console.log('Configuração por servidor: use /configuracoes em cada guild (canal-recibos, cargo-financeiro, canal-resgates).');
+    if (LFG_BOT_ID) {
+        console.log('[integração LFG] Comandos p!m do bot ' + LFG_BOT_ID + ' serão aceitos no canal de recibos.');
+        console.log('[integração LFG] O canal de recibos já é lido da configuração por guild (/configuracoes canal-recibos).');
+    } else {
+        console.warn('[integração LFG] LFG_BOT_ID não definido no .env do Siri — comandos p!m serão IGNORADOS.');
+    }
 });
 
 client.on('messageCreate', async (message) => {
-    if (!message.guild || message.author?.bot) return;
+    if (!message.guild) return;
+
+    const ehBot = message.author?.bot;
+
+    // Bloqueia todos os bots EXCETO: o bot Friday (recibos visuais) e o bot LFG (comandos p!m)
+    if (ehBot && message.author.id !== FRIDAY_BOT_ID && message.author.id !== LFG_BOT_ID) return;
+
     try {
+        // Tenta processar como comando p!m do LFG primeiro
+        if (ehBot && message.author.id === LFG_BOT_ID) {
+            const processado = await processarComandoPM(message);
+            if (!processado) {
+                console.warn(`[p!m] Mensagem do LFG ignorada (formato inválido ou canal errado): "${message.content}"`);
+            }
+            return; // mensagens do LFG só são tratadas aqui
+        }
+
+        // Para humanos e o bot Friday, processa como recibo normal
         await processarReciboEMnotificar(message);
     } catch (error) {
-        console.error('Erro ao processar recibo:', error);
+        console.error('Erro ao processar mensagem:', error);
     }
 });
 
